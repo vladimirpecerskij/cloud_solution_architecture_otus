@@ -1,0 +1,33 @@
+openapi: 3.0.0
+info:
+  title: Serverless Weather API
+  version: 1.0.0
+paths:
+  /weather:
+    get:
+      summary: Get weather forecast via Function 1 -> YDB + Function 2
+      parameters:
+        - name: user
+          in: query
+          schema:
+            type: string
+        - name: lat
+          in: query
+          schema:
+            type: string
+        - name: lon
+          in: query
+          schema:
+            type: string
+        - name: start_date
+          in: query
+          schema:
+            type: string
+        - name: end_date
+          in: query
+          schema:
+            type: string
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: d4ebpenli0omn9fq6oqt
+        service_account_id: ajevfnpdh8vsrli7emn9
