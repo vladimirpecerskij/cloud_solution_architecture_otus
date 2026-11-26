@@ -1,189 +1,194 @@
-# Лабораторная работа №2. Настройка OSPF в Underlay-сети фабрики CLOS
+# Домашнее задание №5: Работа с контейнеризацией в облачных средах
 
-Цель работы: Настроить протокол динамической маршрутизации OSPF (Open Shortest Path First) в Underlay-сети для обеспечения автоматической IP-связности между всеми сетевыми устройствами фабрики CLOS.
+**Цель работы:** Познакомиться с инструментами контейнеризации и оркестрации в облачной среде Yandex Cloud (`Container Registry`, `Serverless Containers`, `Container Optimized Image`, `Managed Service for Kubernetes`).
 
-## 1. Топология сети
+---
 
-Топология полностью наследует архитектуру из первой лабораторной работы, собранную в эмуляторе PNETLab.
-![Топология CLOS](pnet_topology.png)
-- **Spine-уровень:** 2 коммутатора Cisco vIOS L3 (Spine-01, Spine-02).
-- **Leaf-уровень:** 2 роутера Cisco vIOS (Leaf-01, Leaf-02).
-- **Схема подключений:** Каждый Leaf-коммутатор соединён с каждым Spine-коммутатором (full-mesh на уровне Spine-Leaf).
+## Используемые параметры и ресурсы
 
-## 2. План работ
+| Параметр / Ресурс | Значение |
+| :--- | :--- |
+| **Облачный провайдер** | Yandex Cloud (`ru-central1-a`) |
+| **Container Registry** | `otus-csa-registry` (`crpqvn9b88r454rgffob`) |
+| **Сервисный аккаунт** | `hw5-container-sa` (`ajeno7h1bgp9bpmmd3j4`) |
+| **Сеть / Подсеть** | `hw5-net` / `hw5-subnet` (`10.30.1.0/24`) |
+| **ВМ Container Solution (COI)** | `hw5-coi-vm` (External IP: `51.250.95.7`, Internal IP: `10.30.1.8`) |
+| **Кластер Kubernetes** | `hw5-k8s-cluster` (`catros8gj4dsh6haeg2o`) |
+| **Рабочий узел K8s** | `cl1cqca1ks6mqcf6b794-usic` (External IP: `89.169.133.161`, Internal IP: `10.30.1.27`) |
 
-1. **Анализ существующей конфигурации:** Проверить назначение IP-адресов на всех интерфейсах и Loopback.
-2. **Планирование OSPF:** Выбрать зону (Area 0), определить Router ID для каждого устройства (использовать Loopback-адреса).
-3. **Настройка OSPF на Spine-коммутаторах:** Включить процесс OSPF, объявить все P2P-линки и Loopback-интерфейс.
-4. **Настройка OSPF на Leaf-коммутаторах:** Включить процесс OSPF, объявить все P2P-линки и Loopback-интерфейс.
-5. **Верификация:** Проверить установление соседств (OSPF neighbors) и наличие маршрутов в таблице маршрутизации.
-6. **Документирование:** Зафиксировать конфигурации и результаты проверки.
+---
 
-## 3. Адресное пространство Underlay (неизменно)
+## 1. Подготовка тестового контейнера и исходного кода
 
-Используется адресное пространство, спроектированное в первой лабораторной работе.
+Создано тестовое веб-приложение на базе лёгкого образа `nginx:alpine` с пользовательской HTML-страницей.
 
-| Устройство | Интерфейс | IP-адрес / Маска | Назначение |
-| :--- | :--- | :--- | :--- |
-| **Spine-01** | Loopback0 | 10.255.0.1/32 | Router ID |
-| | Gi0/0 | 10.0.1.0/31 | p2p-линк к Leaf-01 |
-| | Gi0/1 | 10.0.1.2/31 | p2p-линк к Leaf-02 |
-| **Spine-02** | Loopback0 | 10.255.0.2/32 | Router ID |
-| | Gi0/0 | 10.0.2.0/31 | p2p-линк к Leaf-01 |
-| | Gi0/1 | 10.0.2.2/31 | p2p-линк к Leaf-02 |
-| **Leaf-01** | Loopback0 | 10.255.0.11/32 | Router ID |
-| | Gi0/0 | 10.0.1.1/31 | p2p-линк к Spine-01 |
-| | Gi0/1 | 10.0.2.1/31 | p2p-линк к Spine-02 |
-| **Leaf-02** | Loopback0 | 10.255.0.12/32 | Router ID |
-| | Gi0/0 | 10.0.1.3/31 | p2p-линк к Spine-01 |
-| | Gi0/1 | 10.0.2.3/31 | p2p-линк к Spine-02 |
+**`index.html` (версия 1.0):**
+```html
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Cloud Containers HW</title></head>
+<body>
+  <h1>Version 1.0 - Hello from Yandex Cloud!</h1>
+</body>
+</html>
+```
 
-## 4. Конфигурация оборудования (OSPF)
+**`Dockerfile`:**
+```dockerfile
+FROM nginx:alpine
+COPY index.html /usr/share/nginx/html/index.html
+EXPOSE 80
+```
 
-Ниже приведены конфигурации для всех устройств. В качестве протокола маршрутизации используется **OSPFv2 для IPv4**.
+**Сборка локального образа:**
+```bash
+docker build -t otus-web:v1 .
+```
 
-### Spine-01
-```cisco
-hostname Spine-01
-!
-interface Loopback0
- ip address 10.255.0.1 255.255.255.255
-!
-interface GigabitEthernet0/0
- no switchport
- ip address 10.0.1.0 255.255.255.254
- no shutdown
-!
-interface GigabitEthernet0/1
- no switchport
- ip address 10.0.1.2 255.255.255.254
- no shutdown
-!
-router ospf 1
- router-id 10.255.0.1
- network 10.0.1.0 0.0.0.1 area 0
- network 10.0.1.2 0.0.0.1 area 0
- network 10.255.0.1 0.0.0.0 area 0
-Spine-01(config)# interface GigabitEthernet0/0
-Spine-01(config-if)# ip ospf network point-to-point
-Spine-01(config-if)# interface GigabitEthernet0/1
-Spine-01(config-if)# ip ospf network point-to-point
-!
-Spine-02
-cisco
-hostname Spine-02
-!
-interface Loopback0
- ip address 10.255.0.2 255.255.255.255
-!
-interface GigabitEthernet0/0
- no switchport
- ip address 10.0.2.0 255.255.255.254
- no shutdown
-!
-interface GigabitEthernet0/1
- no switchport
- ip address 10.0.2.2 255.255.255.254
- no shutdown
-!
-router ospf 1
- router-id 10.255.0.2
- network 10.0.2.0 0.0.0.1 area 0
- network 10.0.2.2 0.0.0.1 area 0
- network 10.255.0.2 0.0.0.0 area 0
-Spine-02(config)# interface GigabitEthernet0/0
-Spine-02(config-if)# ip ospf network point-to-point
-Spine-02(config-if)# interface GigabitEthernet0/1
-Spine-02(config-if)# ip ospf network point-to-point
-!
-Leaf-01
-cisco
-hostname Leaf-01
-!
-interface Loopback0
- ip address 10.255.0.11 255.255.255.255
-!
-interface GigabitEthernet0/0
- ip address 10.0.1.1 255.255.255.254
- no shutdown
-!
-interface GigabitEthernet0/1
- ip address 10.0.2.1 255.255.255.254
- no shutdown
-!
-router ospf 1
- router-id 10.255.0.11
- network 10.0.1.1 0.0.0.0 area 0
- network 10.0.2.1 0.0.0.0 area 0
- network 10.255.0.11 0.0.0.0 area 0
-Leaf-01(config)# interface GigabitEthernet0/0
-Leaf-01(config-if)# ip ospf network point-to-point
-Leaf-01(config-if)# interface GigabitEthernet0/1
-Leaf-01(config-if)# ip ospf network point-to-point
-!
-Leaf-02
-cisco
-hostname Leaf-02
-!
-interface Loopback0
- ip address 10.255.0.12 255.255.255.255
-!
-interface GigabitEthernet0/0
- ip address 10.0.1.3 255.255.255.254
- no shutdown
-!
-interface GigabitEthernet0/1
- ip address 10.0.2.3 255.255.255.254
- no shutdown
-!
-router ospf 1
- router-id 10.255.0.12
- network 10.0.1.3 0.0.0.0 area 0
- network 10.0.2.3 0.0.0.0 area 0
- network 10.255.0.12 0.0.0.0 area 0
-Leaf-02(config)# interface GigabitEthernet0/0
-Leaf-02(config-if)# ip ospf network point-to-point
-Leaf-02(config-if)# interface GigabitEthernet0/1
-Leaf-02(config-if)# ip ospf network point-to-point
-!
-Примечание: В конфигурациях используется команда network с обратной маской (wildcard mask). Для p2p-линков на Leaf-01 указан точный адрес /32 (0.0.0.0). Это допустимый и часто применяемый подход для точного контроля над анонсируемыми сетями.
+> 📸 *[Скриншот: исходный код `Dockerfile` и `index.html` / результат сборки `docker images`]*
+> <!-- ![Docker Build](screenshots/01_docker_build.png) -->
 
-5. Верификация и проверка связности
-После применения конфигураций необходимо убедиться, что OSPF установил соседства и таблицы маршрутизации заполнены.
+---
 
-Проверка соседств OSPF (на примере Spine-01)
-bash
-Spine-01# show ip ospf neighbor
+## 2. Создание Container Registry и загрузка образа
 
-Neighbor ID     Pri   State           Dead Time   Address         Interface
-10.255.0.11       0   FULL/  -        00:00:31    10.0.1.1        GigabitEthernet0/0
-10.255.0.12       0   FULL/  -        00:00:39    10.0.1.3        GigabitEthernet0/1
-Интерпретация: OSPF установил полные (FULL) соседства с обоими Leaf-коммутаторами. Соседство установлено через интерфейсы Gi0/0 и Gi0/1.
+1. Создан приватный реестр `otus-csa-registry`.
+2. Настроена интеграция локального Docker CLI с `cr.yandex`.
+3. Образ протегирован и отправлен в облачный реестр.
 
-Проверка таблицы маршрутизации (на примере Leaf-01)
-bash
-Leaf-01# show ip route ospf
+```bash
+yc container registry create --name otus-csa-registry
+yc container registry configure-docker
 
-O     10.255.0.2/32 [110/2] via 10.0.2.0, 00:00:10, GigabitEthernet0/1
-O     10.255.0.12/32 [110/2] via 10.0.1.3, 00:00:15, GigabitEthernet0/0
-                    [110/2] via 10.0.2.3, 00:00:10, GigabitEthernet0/1
-Интерпретация: В таблице маршрутизации Leaf-01 появились маршруты до Loopback Spine-02 (10.255.0.2) и до Loopback Leaf-02 (10.255.0.12) через два равнозначных пути (ECMP). Это ключевое преимущество топологии CLOS, реализованное через OSPF.
+docker tag otus-web:v1 cr.yandex/crpqvn9b88r454rgffob/otus-web:v1
+docker push cr.yandex/crpqvn9b88r454rgffob/otus-web:v1
+```
 
-Проверка связности
-Выполним ping с Loopback Leaf-01 до Loopback Leaf-02.
+> 📸 *[Скриншот: созданный реестр `otus-csa-registry` и загруженный образ `otus-web:v1` в Yandex Cloud]*
+> <!-- ![Container Registry](screenshots/02_registry.png) -->
 
-bash
-Leaf-01# ping 10.255.0.12 source 10.255.0.11
-Type escape sequence to abort.
-Sending 5, 100-byte ICMP Echos to 10.255.0.12, timeout is 2 seconds:
-!!!!!
-Success rate is 100 percent (5/5), round-trip min/avg/max = 1/2/4 ms
-6. Выводы по работе
-Цель достигнута: В Underlay-сети дата-центра развернут протокол динамической маршрутизации OSPF.
+---
 
-Автоматизация: Все устройства теперь автоматически обмениваются информацией о маршрутах, что исключает необходимость ручного добавления статических маршрутов и упрощает масштабирование сети.
+## 3. Запуск контейнера в Serverless окружении (Serverless Containers)
 
-ECMP: OSPF на Leaf-коммутаторах установил несколько равнозначных маршрутов до Loopback-адресов (через оба Spine-коммутатора), что обеспечивает балансировку нагрузки и повышает отказоустойчивость.
+1. Создан сервисный аккаунт `hw5-container-sa` с ролью `container-registry.images.puller`.
+2. Создан Serverless-контейнер и развёрнута ревизия с образом `otus-web:v1` (порт `80`).
+3. Открыт публичный вызов контейнера и проверена работа веб-страницы по HTTPS-ссылке.
 
-Связность: Успешно подтверждена полная IP-связность между всеми Loopback-интерфейсами устройств в OSPF-домене.
+```bash
+yc serverless container create --name otus-serverless-app
+yc serverless container revision deploy \
+  --container-name otus-serverless-app \
+  --image cr.yandex/crpqvn9b88r454rgffob/otus-web:v1 \
+  --cores 1 --memory 256MB --execution-timeout 15s \
+  --service-account-id ajeno7h1bgp9bpmmd3j4 --container-port 80
 
+yc serverless container allow-unauthenticated-invoke otus-serverless-app
+```
+
+> 📸 *[Скриншот: запущенный Serverless-контейнер и открытая страница в браузере]*
+> <!-- ![Serverless Container](screenshots/03_serverless.png) -->
+
+---
+
+## 4. Запуск контейнера в Container Solution (Container Optimized Image)
+
+Подготовлена спецификация Docker Compose `spec.yaml` и создана ВМ `hw5-coi-vm` на базе образа **Container Optimized Image (COI)** с публичным IP-адресом (`51.250.95.7`).
+
+**`spec.yaml`:**
+```yaml
+version: '3.7'
+services:
+  web:
+    image: cr.yandex/crpqvn9b88r454rgffob/otus-web:v1
+    ports:
+      - "80:80"
+    restart: always
+```
+
+**Создание ВМ:**
+```bash
+yc compute instance create-with-container \
+  --name hw5-coi-vm \
+  --zone ru-central1-a \
+  --public-ip \
+  --service-account-id ajeno7h1bgp9bpmmd3j4 \
+  --docker-compose-file spec.yaml
+```
+
+> 📸 *[Скриншот: запущенная ВМ `hw5-coi-vm` в Compute Cloud и открытая веб-страница по IP `51.250.95.7`]*
+> <!-- ![Container Solution COI](screenshots/04_coi_vm.png) -->
+
+---
+
+## 5. Развёртывание кластера Kubernetes и публикация через LoadBalancer
+
+1. Создана изолированная сеть `hw5-net` и подсеть `hw5-subnet` (`10.30.1.0/24`).
+2. Развёрнут кластер **Managed Service for Kubernetes** (`hw5-k8s-cluster`) и группа узлов (`cl1cqca1ks6mqcf6b794-usic`).
+3. Применён манифест `k8s-app.yaml`, разворачивающий `Deployment` (2 реплики) и `Service` типа `LoadBalancer` для доступа к приложению извне.
+
+**`k8s-app.yaml`:**
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otus-web-deploy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: otus-web
+  template:
+    metadata:
+      labels:
+        app: otus-web
+    spec:
+      containers:
+      - name: web
+        image: cr.yandex/crpqvn9b88r454rgffob/otus-web:v1
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otus-web-lb
+spec:
+  type: LoadBalancer
+  selector:
+    app: otus-web
+  ports:
+  - port: 80
+    targetPort: 80
+```
+
+> 📸 *[Скриншот: кластер `hw5-k8s-cluster` и группа узлов в Yandex Cloud]*
+> <!-- ![Kubernetes Cluster](screenshots/05_k8s_cluster.png) -->
+> 📸 *[Скриншот: запущенные Pod'ы (`kubectl get pods`) и внешний IP балансировщика (`kubectl get svc`)]*
+> <!-- ![Kubernetes Pods and LB](screenshots/06_k8s_pods_lb.png) -->
+
+---
+
+## 6. Обновление приложения в кластере (Rolling Update)
+
+1. Внесены изменения в `index.html` (`Version 2.0 (Updated!)`).
+2. Собран и загружен в Container Registry новый образ `otus-web:v2`.
+3. Выполнено плавное обновление `Deployment` в кластере без остановки сервиса:
+
+```bash
+docker build -t otus-web:v2 .
+docker tag otus-web:v2 cr.yandex/crpqvn9b88r454rgffob/otus-web:v2
+docker push cr.yandex/crpqvn9b88r454rgffob/otus-web:v2
+
+kubectl set image deployment/otus-web-deploy web=cr.yandex/crpqvn9b88r454rgffob/otus-web:v2
+kubectl rollout status deployment/otus-web-deploy
+```
+
+> 📸 *[Скриншот: обновлённая версия `Version 2.0 (Updated!)` в браузере по IP-адресу LoadBalancer]*
+> <!-- ![Rolling Update v2](screenshots/07_k8s_v2.png) -->
+
+---
+
+## 7. Очистка облачных ресурсов
+
+По завершении проверки все созданные облачные ресурсы (кластер Kubernetes, рабочие узлы, сетевой балансировщик, ВМ COI, Serverless-контейнер, образы и реестр `otus-csa-registry`, подсеть `hw5-subnet`, сеть `hw5-net` и сервисный аккаунт `hw5-container-sa`) были полностью удалены через `yc` CLI.
