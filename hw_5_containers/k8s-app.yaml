@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otus-web-deploy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: otus-web
+  template:
+    metadata:
+      labels:
+        app: otus-web
+    spec:
+      containers:
+      - name: web
+        image: cr.yandex/crpqvn9b88r454rgffob/otus-web:v1
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otus-web-lb
+spec:
+  type: LoadBalancer
+  selector:
+    app: otus-web
+  ports:
+  - port: 80
+    targetPort: 80

@@ -1,0 +1,7 @@
+version: '3.7'
+services:
+  web:
+    image: cr.yandex/crpqvn9b88r454rgffob/otus-web:v1
+    ports:
+      - "80:80"
+    restart: always
